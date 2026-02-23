@@ -13,8 +13,8 @@ from pathlib import Path
 from openai import OpenAI
 
 # 导入现有模块
-from video_to_frames import video_to_frames
-from frames_to_description import (
+from image_processing.video_to_frames import video_to_frames
+from image_processing.frames_to_description import (
     get_image_files,
     group_images,
     describe_frame_group,
@@ -43,7 +43,10 @@ def collect_json_descriptions(group_dir: str) -> list:
     Returns:
         按顺序排列的描述列表
     """
-    json_files = sorted(glob.glob(os.path.join(group_dir, "group_*.json")))
+    import re
+    json_files = glob.glob(os.path.join(group_dir, "group_*.json"))
+    # 按数字顺序排序，而不是字符串排序
+    json_files.sort(key=lambda x: int(re.search(r'group_(\d+)\.json', os.path.basename(x)).group(1)))
     descriptions = []
     
     for json_file in json_files:
@@ -56,6 +59,32 @@ def collect_json_descriptions(group_dir: str) -> list:
             })
     
     return descriptions
+
+
+def group_descriptions_by_count(
+    descriptions: list,
+    group_count: int
+) -> list:
+    """
+    按group数量将描述分组
+    
+    Args:
+        descriptions: 描述列表
+        group_count: 每组包含的group数量
+    
+    Returns:
+        按group数量分组的描述列表
+    """
+    if group_count <= 0:
+        # 如果group_count为0或负数，返回所有描述作为一个组
+        return [descriptions]
+    
+    windows = []
+    for i in range(0, len(descriptions), group_count):
+        window = descriptions[i:i + group_count]
+        windows.append(window)
+    
+    return windows
 
 
 def group_descriptions_by_time_window(
@@ -188,9 +217,13 @@ def process_video(
     group_size: int = 10,
     overlap: int = 2,
     time_window: float = 10.0,
+    summary_group_count: int = 0,
     llm_api_key: str = "ollama",
-    llm_model: str = "gemma3:27b",
+    llm_model: str = "qwen3-vl:32b",
     llm_base_url: str = "http://127.0.0.1:11434/v1",
+    summary_model: str = None,
+    summary_api_key: str = None,
+    summary_base_url: str = None,
     skip_frames: bool = False,
     skip_descriptions: bool = False
 ):
@@ -203,10 +236,13 @@ def process_video(
         fps: 每秒截图数量
         group_size: 每组图片数量
         overlap: 组之间的重叠帧数
-        time_window: 时间窗口大小（秒），0表示不分割，生成一个总结
-        llm_api_key: LLM API密钥
-        llm_model: LLM模型名称
-        llm_base_url: LLM API基础URL
+        summary_group_count: 按group数量分组，每组包含的group数量，0表示生成单个完整总结
+        llm_api_key: 图像理解LLM API密钥
+        llm_model: 图像理解LLM模型名称
+        llm_base_url: 图像理解LLM API基础URL
+        summary_model: 总结LLM模型名称（如果未设置，使用llm_model）
+        summary_api_key: 总结LLM API密钥（如果未设置，使用llm_api_key）
+        summary_base_url: 总结LLM API基础URL（如果未设置，使用llm_base_url）
         skip_frames: 是否跳过视频转帧步骤（如果已有帧图片）
         skip_descriptions: 是否跳过描述生成步骤（如果已有描述JSON）
     """
@@ -238,11 +274,20 @@ def process_video(
     print(f"  - 总结: {summary_dir}")
     print(f"截图频率: {fps} 张/秒")
     print(f"分组设置: 每组 {group_size} 张, 重叠 {overlap} 帧")
-    if time_window > 0:
-        print(f"时间窗口: 每 {time_window} 秒生成一个总结")
+    if summary_group_count > 0:
+        print(f"总结分组: 每 {summary_group_count} 个group生成一个总结")
     else:
-        print(f"时间窗口: 生成单个完整总结")
-    print(f"LLM模型: {llm_model}")
+        print(f"总结方式: 生成单个完整总结")
+    
+    # 确定总结模型配置（如果未设置，使用图像理解模型配置）
+    final_summary_model = summary_model if summary_model else llm_model
+    final_summary_api_key = summary_api_key if summary_api_key else llm_api_key
+    final_summary_base_url = summary_base_url if summary_base_url else llm_base_url
+    
+    print(f"图像理解模型: {llm_model}")
+    print(f"总结模型: {final_summary_model}")
+    if summary_model or summary_api_key or summary_base_url:
+        print(f"  (使用独立总结模型配置)")
     print("-" * 60)
     
     # 步骤1: 视频转帧
@@ -316,10 +361,10 @@ def process_video(
     # 步骤3: 生成总结
     print("\n【步骤 3/3】 生成总结...")
     
-    # 初始化客户端
-    client = OpenAI(
-        api_key=llm_api_key,
-        base_url=llm_base_url
+    # 初始化总结模型客户端（使用独立配置或图像理解模型配置）
+    summary_client = OpenAI(
+        api_key=final_summary_api_key,
+        base_url=final_summary_base_url
     )
     
     # 收集所有描述
@@ -329,16 +374,17 @@ def process_video(
         print("错误: 未找到描述文件")
         return
     
-    # 按时间窗口分组
-    if time_window > 0:
-        print(f"\n按时间窗口 ({time_window}秒) 分组描述...")
-        time_windows = group_descriptions_by_time_window(
-            descriptions, time_window, frames_dir
+    # 按group数量分组
+    if summary_group_count > 0:
+        # 优先使用按group数量分组
+        print(f"\n按group数量 ({summary_group_count}个/组) 分组描述...")
+        summary_windows = group_descriptions_by_count(
+            descriptions, summary_group_count
         )
-        print(f"分为 {len(time_windows)} 个时间窗口")
+        print(f"分为 {len(summary_windows)} 个总结组")
         
-        # 为每个时间窗口生成总结
-        for i, window_descriptions in enumerate(time_windows):
+        # 为每个总结组生成总结
+        for i, window_descriptions in enumerate(summary_windows):
             # 计算时间范围
             if window_descriptions:
                 first_image = window_descriptions[0]['images'][0] if window_descriptions[0]['images'] else ""
@@ -352,13 +398,14 @@ def process_video(
             summary_file = os.path.join(summary_dir, f"summary_{i + 1:03d}_{start_time:.1f}s-{end_time:.1f}s.json")
             summary = summarize_descriptions(
                 descriptions=window_descriptions,
-                client=client,
-                model=llm_model,
+                client=summary_client,
+                model=final_summary_model,
                 output_file=summary_file,
                 time_range=time_range
             )
             
-            print(f"\n时间窗口 {i + 1}/{len(time_windows)} 完成")
+            print(f"\n总结组 {i + 1}/{len(summary_windows)} 完成")
+            print(f"  包含 {len(window_descriptions)} 个group")
             print(f"  时间范围: {start_time:.2f}s - {end_time:.2f}s")
             print(f"  总结预览: {summary[:100]}...")
     else:
@@ -367,8 +414,8 @@ def process_video(
         summary_file = os.path.join(summary_dir, "summary_full.json")
         summary = summarize_descriptions(
             descriptions=descriptions,
-            client=client,
-            model=llm_model,
+            client=summary_client,
+            model=final_summary_model,
             output_file=summary_file
         )
         
@@ -386,7 +433,7 @@ def process_video(
     print(f"\n文件输出位置: {base_output_dir}")
     print(f"  - 图片帧: {frames_dir}/frame_*.jpg")
     print(f"  - 分组描述: {group_dir}/group_*.json")
-    if time_window > 0:
+    if summary_group_count > 0:
         print(f"  - 分段总结: {summary_dir}/summary_*.json")
     else:
         print(f"  - 完整总结: {summary_dir}/summary_full.json")
@@ -398,17 +445,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 完整处理流程（每10秒一个总结）
-  python video_summary_demo.py --video data/摆放剃须刀.mp4 --time-window 10
+  # 完整处理流程（每5个group一个总结，默认）
+  python video_summary_demo.py --video data/摆放剃须刀.mp4
+  
+  # 每10个group生成一个总结
+  python video_summary_demo.py --video data/摆放剃须刀.mp4 --summary-group-count 10
   
   # 生成单个完整总结
-  python video_summary_demo.py --video data/摆放剃须刀.mp4 --time-window 0
+  python video_summary_demo.py --video data/摆放剃须刀.mp4 --summary-group-count 0
   
   # 自定义参数
-  python video_summary_demo.py --video data/摆放剃须刀.mp4 --fps 5 --group-size 8 --overlap 2 --time-window 15
+  python video_summary_demo.py --video data/摆放剃须刀.mp4 --fps 5 --group-size 8 --overlap 2 --summary-group-count 5
   
   # 使用不同的模型
   python video_summary_demo.py -v data/摆放剃须刀.mp4 --model qwen3:8b --time-window 10
+  
+  # 使用独立的总结模型（图像理解用视觉模型，总结用文本模型）
+  python video_summary_demo.py -v data/摆放剃须刀.mp4 --model gemma3:27b --summary-model gpt-4 --summary-base-url https://api.openai.com/v1
   
   # 如果已有帧图片，跳过视频转帧
   python video_summary_demo.py --video data/摆放剃须刀.mp4 --skip-frames --time-window 10
@@ -454,31 +507,52 @@ def main():
     )
     
     parser.add_argument(
-        '-t', '--time-window',
-        type=float,
-        default=10.0,
-        help='时间窗口大小（秒），每N秒生成一个总结。设为0表示生成单个完整总结 (默认: 10.0)'
+        '-c', '--summary-group-count',
+        type=int,
+        default=5,
+        help='按group数量分组，每N个group生成一个总结。设为0表示生成单个完整总结 (默认: 5)'
     )
     
     parser.add_argument(
         '--api-key',
         type=str,
         default='ollama',
-        help='LLM API密钥 (默认: ollama)'
+        help='图像理解LLM API密钥 (默认: ollama)'
     )
     
     parser.add_argument(
         '--model',
         type=str,
         default='gemma3:27b',
-        help='LLM模型名称 (默认: gemma3:27b)'
+        help='图像理解LLM模型名称 (默认: gemma3:27b)'
     )
     
     parser.add_argument(
         '--base-url',
         type=str,
         default='http://127.0.0.1:11434/v1',
-        help='LLM API基础URL (默认: http://127.0.0.1:11434/v1)'
+        help='图像理解LLM API基础URL (默认: http://127.0.0.1:11434/v1)'
+    )
+    
+    parser.add_argument(
+        '--summary-model',
+        type=str,
+        default=None,
+        help='总结LLM模型名称（如果未设置，使用--model指定的模型）'
+    )
+    
+    parser.add_argument(
+        '--summary-api-key',
+        type=str,
+        default=None,
+        help='总结LLM API密钥（如果未设置，使用--api-key指定的密钥）'
+    )
+    
+    parser.add_argument(
+        '--summary-base-url',
+        type=str,
+        default=None,
+        help='总结LLM API基础URL（如果未设置，使用--base-url指定的URL）'
     )
     
     parser.add_argument(
@@ -506,10 +580,14 @@ def main():
         fps=args.fps,
         group_size=args.group_size,
         overlap=args.overlap,
-        time_window=args.time_window,
+        time_window=0,  # 已移除时间窗口方式
+        summary_group_count=args.summary_group_count,
         llm_api_key=args.api_key,
         llm_model=args.model,
         llm_base_url=args.base_url,
+        summary_model=args.summary_model,
+        summary_api_key=args.summary_api_key,
+        summary_base_url=args.summary_base_url,
         skip_frames=args.skip_frames,
         skip_descriptions=args.skip_descriptions
     )

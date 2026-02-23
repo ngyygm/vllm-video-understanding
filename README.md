@@ -33,6 +33,16 @@ python video_summary_demo.py --video data/your_video.mp4 --time-window 0
 ### 完整流程处理
 
 ```bash
+# 推荐：按group数量分组（不会遗漏任何group）
+python video_summary_demo.py \
+    --video data/your_video.mp4 \
+    --fps 3.0 \
+    --group-size 10 \
+    --overlap 2 \
+    --summary-group-count 5 \
+    --model gemma3:27b
+
+# 或使用时间窗口分组
 python video_summary_demo.py \
     --video data/your_video.mp4 \
     --fps 3.0 \
@@ -51,9 +61,13 @@ python video_summary_demo.py \
 | `-f, --fps` | `3.0` | 每秒截图数量 |
 | `-g, --group-size` | `10` | 每组图片数量 |
 | `-p, --overlap` | `2` | 组之间的重叠帧数 |
-| `-t, --time-window` | `10.0` | 时间窗口大小（秒），0表示生成单个完整总结 |
-| `--model` | `gemma3:27b` | LLM模型名称 |
-| `--base-url` | `http://127.0.0.1:11434/v1` | LLM API基础URL（默认Ollama） |
+| `-t, --time-window` | `10.0` | 时间窗口大小（秒），0表示生成单个完整总结（如果设置了--summary-group-count则忽略） |
+| `-c, --summary-group-count` | `0` | 按group数量分组，每N个group生成一个总结。设为0表示使用time-window方式（推荐） |
+| `--model` | `gemma3:27b` | 图像理解LLM模型名称 |
+| `--base-url` | `http://127.0.0.1:11434/v1` | 图像理解LLM API基础URL（默认Ollama） |
+| `--summary-model` | `None` | 总结LLM模型名称（未设置时使用--model） |
+| `--summary-api-key` | `None` | 总结LLM API密钥（未设置时使用--api-key） |
+| `--summary-base-url` | `None` | 总结LLM API基础URL（未设置时使用--base-url） |
 | `--skip-frames` | - | 跳过视频转帧步骤（使用已有帧） |
 | `--skip-descriptions` | - | 跳过描述生成步骤（使用已有描述） |
 
@@ -138,6 +152,24 @@ python video_summary_demo.py \
     --base-url https://api.openai.com/v1
 ```
 
+### 使用独立的总结模型
+
+图像理解和总结可以使用不同的模型，这对于优化性能和成本很有用：
+
+```bash
+# 图像理解使用视觉模型，总结使用文本模型
+python video_summary_demo.py \
+    --video data/your_video.mp4 \
+    --model gemma3:27b \
+    --summary-model gpt-4 \
+    --summary-api-key your-openai-key \
+    --summary-base-url https://api.openai.com/v1
+```
+
+**使用场景：**
+- 图像理解：使用支持视觉的多模态模型（如 gemma3:27b, qwen2-vl:7b）
+- 总结：使用纯文本模型（如 gpt-4, claude-3），通常更便宜且总结能力更强
+
 ### 使用其他兼容OpenAI API的服务
 
 只需修改 `--base-url` 和 `--api-key` 参数即可。
@@ -159,10 +191,16 @@ python video_summary_demo.py \
 
 ## 💡 使用技巧
 
-1. **长视频处理**：使用 `--time-window` 参数将长视频分段处理，避免单次处理内容过多
-2. **提高精度**：增加 `--fps` 值可以获取更多帧，但会增加处理时间
-3. **节省资源**：使用 `--skip-frames` 和 `--skip-descriptions` 可以跳过已完成的步骤
-4. **模型选择**：根据视频复杂度选择合适的模型，简单场景可用较小模型
+1. **总结分组方式**：
+   - **推荐使用 `--summary-group-count`**：按group数量分组，不会遗漏任何group，更可靠
+   - 使用 `--time-window`：按时间窗口分组，但可能因为时间间隔不均匀而跳过某些group
+2. **长视频处理**：使用分组参数将长视频分段处理，避免单次处理内容过多
+3. **提高精度**：增加 `--fps` 值可以获取更多帧，但会增加处理时间
+4. **节省资源**：使用 `--skip-frames` 和 `--skip-descriptions` 可以跳过已完成的步骤
+5. **模型选择**：
+   - 图像理解：使用支持视觉的多模态模型（如 gemma3:27b, qwen2-vl:7b）
+   - 总结：可以使用纯文本模型（如 gpt-4），通常总结能力更强且成本更低
+6. **成本优化**：图像理解用本地模型（Ollama），总结用云端API，平衡性能和成本
 
 ## 🤝 贡献
 
